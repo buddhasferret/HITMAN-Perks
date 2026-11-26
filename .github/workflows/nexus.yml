@@ -1,0 +1,92 @@
+# Uploads Perks to its Nexus Mods page with the official Nexus upload action (Upload API v3, open beta).
+#
+# - A published release uploads its Perks-SMF.zip as a new version of the Nexus SMF file (version = the tag) and
+#   archives the old one. Release tags must stay plain versions (0.48.0): SMF compares every tag as a version.
+# - Run by hand (Actions tab, or `gh workflow run nexus.yml`):
+#     target "check": only checks that the NEXUSMODS_API_KEY secret exists (nothing is uploaded, the key isn't used)
+#     target "smf":   uploads <tag>'s Perks-SMF.zip as version <version> of the SMF file
+#     target "sdk":   uploads <tag>'s Perks-SDK.zip as version <version> of the SDK file (Perks.dll updates: SMF
+#                     doesn't update SDK mods, so they get no release of their own; the zip is attached to a release)
+#
+# The Nexus key is the repository secret NEXUSMODS_API_KEY; it's only ever handed to the Nexus action.
+name: Upload to Nexus Mods
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "check, smf or sdk"
+        required: true
+        default: check
+        type: choice
+        options: [check, smf, sdk]
+      tag:
+        description: "Release whose zip to upload (smf / sdk)"
+        required: false
+      version:
+        description: "Version to show on Nexus (smf / sdk; defaults to the tag)"
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  NEXUS_SMF_FILE_ID: "8454774"
+  NEXUS_SDK_FILE_ID: "8454780"
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the Nexus key secret
+        env:
+          KEY: ${{ secrets.NEXUSMODS_API_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::The NEXUSMODS_API_KEY secret is missing or empty"
+            exit 1
+          fi
+          echo "The NEXUSMODS_API_KEY secret is set."
+
+      - name: Work out what to upload
+        id: what
+        if: github.event_name == 'release' || inputs.target != 'check'
+        env:
+          EVENT: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          TARGET: ${{ inputs.target }}
+          TAG: ${{ inputs.tag }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$EVENT" = "release" ]; then TARGET=smf; TAG="$RELEASE_TAG"; fi
+          if [ -z "$TAG" ]; then echo "::error::No release tag given"; exit 1; fi
+          if [ -z "$VERSION" ]; then VERSION="$TAG"; fi
+          if [ "$TARGET" = "smf" ]; then FILE=Perks-SMF.zip; ID="$NEXUS_SMF_FILE_ID"; NAME="Perks SMF"; else FILE=Perks-SDK.zip; ID="$NEXUS_SDK_FILE_ID"; NAME="Perks SDK"; fi
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "file=$FILE"
+            echo "file_id=$ID"
+            echo "name=$NAME"
+          } >> "$GITHUB_OUTPUT"
+          echo "Uploading $FILE from release $TAG as version $VERSION of Nexus file $ID"
+
+      - name: Download the zip from the release
+        if: steps.what.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "${{ steps.what.outputs.tag }}" --repo "${{ github.repository }}" --pattern "${{ steps.what.outputs.file }}"
+
+      - name: Upload to Nexus Mods
+        if: steps.what.outcome == 'success'
+        # Nexus-Mods/upload-action v1.0.0-beta.11, pinned to its commit
+        uses: Nexus-Mods/upload-action@98532f7670c27cbecc78fae03fa3e278147827e2
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_id: ${{ steps.what.outputs.file_id }}
+          filename: ${{ steps.what.outputs.file }}
+          version: ${{ steps.what.outputs.version }}
+          display_name: ${{ steps.what.outputs.name }}
+          archive_existing_version: "true"
